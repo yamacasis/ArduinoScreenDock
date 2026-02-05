@@ -148,7 +148,7 @@ void showDisconnected() {
   tft.print("NOT CONNECTED");
   
   tft.setTextSize(2);
-  tft.setCursor(centerX - 80, centerY + 55);
+  tft.setCursor(centerX - 120, centerY + 55);
   tft.print("Check Data Sender");
   
   screenLayoutDrawn = false; // Reset flag when showing disconnect

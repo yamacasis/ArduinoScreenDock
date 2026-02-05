@@ -399,4 +399,4 @@ while True:
 
     print("Sent:", msg)
 
-    time.sleep(3)
+    time.sleep(5)

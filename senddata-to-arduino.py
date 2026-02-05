@@ -3,6 +3,7 @@ import serial
 import time
 import requests
 import jdatetime
+import subprocess
 
 PORT = "COM7"   # Change this!
 BAUD = 9600
@@ -14,6 +15,27 @@ time.sleep(2)
 prev_net_down = 0
 prev_net_up = 0
 prev_time = time.time()
+
+# Uptime base caching (avoid expensive Windows event log query every loop)
+_uptime_base_epoch = None
+_uptime_base_last_refresh = 0.0
+
+
+def _get_windows_last_start_or_wake_epoch():
+    """Return unix epoch seconds of the most recent system start or wake event."""
+    ps = (
+        "$boot = (Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Kernel-General'; Id=12} -MaxEvents 1).TimeCreated;"
+        "$wake = (Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Power-Troubleshooter'; Id=1} -MaxEvents 1).TimeCreated;"
+        "$t = $boot; if ($wake -and $boot -and $wake -gt $boot) { $t = $wake };"
+        "if (-not $t) { $t = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime };"
+        "[int64]([DateTimeOffset]$t).ToUnixTimeSeconds()"
+    )
+    out = subprocess.check_output(
+        ['powershell', '-NoProfile', '-Command', ps],
+        timeout=5,
+        stderr=subprocess.DEVNULL,
+    ).decode(errors='ignore').strip()
+    return int(out)
 
 
 def get_weather():
@@ -205,14 +227,37 @@ def get_cpu_freq():
 
 
 def get_uptime():
-    """Get system boot time as HH:MM with Jalali day name"""
+    """Get system uptime (time since boot) as a compact string.
+
+    Format:
+      - HH:MM            (for < 1 day)
+      - Xd HH:MM         (for >= 1 day)
+
+    Note: Must not contain commas because the Arduino side parses CSV.
+    """
     try:
-        from datetime import datetime
-        import time
-        boot_time = psutil.boot_time()
-        boot_datetime = datetime.fromtimestamp(boot_time)
-        
-        return boot_datetime.strftime("%H:%M")
+        global _uptime_base_epoch, _uptime_base_last_refresh
+        now = time.time()
+
+        # Refresh at most every 5 minutes (and also when base is unknown)
+        if _uptime_base_epoch is None or (now - _uptime_base_last_refresh) > 300:
+            base = None
+            try:
+                base = _get_windows_last_start_or_wake_epoch()
+            except Exception:
+                base = int(psutil.boot_time())
+            _uptime_base_epoch = int(base)
+            _uptime_base_last_refresh = now
+
+        uptime_seconds = max(0, int(now - _uptime_base_epoch))
+
+        days, rem = divmod(uptime_seconds, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes, seconds = divmod(rem, 60)
+
+        if days > 0:
+            return f"{days}d {hours:02}:{minutes:02}"
+        return f"{hours:02}:{minutes:02}"
     except Exception as e:
         print(f"Uptime error: {e}")
         return "00:00"
@@ -304,6 +349,15 @@ while True:
     net_io = psutil.net_io_counters()
     current_time = time.time()
     time_diff = current_time - prev_time
+
+    # If the machine slept/hibernated, time_diff will be huge.
+    # Reset network speed baselines and force uptime base refresh.
+    if time_diff > 30:
+        prev_net_down = net_io.bytes_recv
+        prev_net_up = net_io.bytes_sent
+        prev_time = current_time
+        time_diff = 1.0
+        _uptime_base_epoch = None
     
     net_down = (net_io.bytes_recv - prev_net_down) / 1024 / time_diff  # KB/s
     net_up = (net_io.bytes_sent - prev_net_up) / 1024 / time_diff      # KB/s
@@ -332,7 +386,7 @@ while True:
     shamsi_time = now.strftime("%H:%M")
 
     # Add day of week name (English abbreviations for Arduino compatibility)
-    day_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+    day_names = ['SH', '1SH', '2SH', '3SH', '$SH', '5SH', 'JOM']
     day_name = day_names[now.weekday()]
     
     shamsi_time = shamsi_time + " " + day_name
